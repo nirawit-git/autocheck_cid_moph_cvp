@@ -34,5 +34,30 @@ module.exports = {
         return db('moph_vaccine_history_api')
             .update(data)
             .where('moph_vaccine_history_id', moph_vaccine_history_id)
+    },
+    ////////////////////////////////////////////////////////////////////////////
+    getVaccineInventoryLabel(db, label_code) {
+        const sql = `
+        SELECT CONCAT(p.pname,p.fname,' ',p.lname) AS fullname,v.recipient_datetime AS datetime,o.vn,p.hn,v.label_code from ovst o
+        LEFT JOIN patient p ON p.hn = o.hn
+        LEFT JOIN vaccine_inventory_label v ON v.recipient_vn = o.vn
+        WHERE v.label_code = '${label_code}'
+        `;
+        return db.raw(sql)
+    },
+    setNullVaccineInventoryLabel(db, label_code) {
+        return db('vaccine_inventory_label')
+            .update('recipient_vn', null)
+            .where('label_code', label_code)
+    },
+    getHNformCID(db, cid) {
+        return db('patient AS p')
+            .select('p.hn', 'p.pname', 'p.fname', 'p.lname', 'p.addrpart', 'p.moopart', 'p.birthday', 'p.passport_no', 't.full_name')
+            .leftJoin('thaiaddress AS t', 't.addressid', 'p.addressid')
+            .where('cid', cid)
+    },
+    getNationality(db) {
+        return db('nationality')
+            .select('name', 'nationality', 'nhso_code')
     }
 };

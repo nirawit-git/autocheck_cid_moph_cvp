@@ -68,6 +68,8 @@ var db = require("knex")({
 });
 
 const auth = require("./middleware/auth");
+const req = require("express/lib/request");
+const res = require("express/lib/response");
 
 // @ts-ignore
 app.get("/", (req, res) =>
@@ -91,6 +93,7 @@ app.post("/login", async(req, res) => {
             }
         );
         if (rs[0].length == 1) {
+            await getToken();
             res.send({
                 ok: true,
                 data: rs[0][0],
@@ -109,13 +112,48 @@ app.post("/login", async(req, res) => {
     }
 })
 
+// app.get('/get_token', async(req, res) => {
+//     const rs = await axios.get(
+//         `/token?Action=get_moph_access_token&${process.env.CVP_MOPH_ACCESS_TOKEN}`, {
+//             httpsAgent: new https.Agent({
+//                 rejectUnauthorized: false
+//             })
+//         }
+//     );
+
+//     if (rs.status == 200) {
+//         _token = rs.data;
+//         res.send({ code: rs.status });
+//     } else {
+//         res.send({ code: rs.status });
+//     }
+
+// });
+
+app.get('/get_nationality', auth, async(req, res) => {
+    const rs = await model.getNationality(dbHIS);
+    // console.log(rs);
+    if (rs.length > 0) {
+        res.send({
+            ok: true,
+            data: rs,
+        });
+    } else {
+        res.send({
+            ok: false,
+            message: 'ไม่พบข้อมูล!'
+        });
+    }
+
+});
 
 app.get("/check/:cid", auth, async(req, res) => {
     var cid = req.params.cid;
     try {
         // @ts-ignore
         await checkToken();
-        axios.get(`/api/ImmunizationHistory?cid=${cid}`, {
+        const patient = await checkHN(cid);
+        await axios.get(`/api/ImmunizationHistory?cid=${cid}`, {
                 headers: {
                     Authorization: `Bearer ${_token}`
                 },
@@ -124,7 +162,7 @@ app.get("/check/:cid", auth, async(req, res) => {
                 })
             }).then(function(response) {
                 // console.log(response)
-                res.send(response.data);
+                res.send({ api_data: response.data, patient: patient });
             })
             .catch(function(error) {
                 res.send(error.response.data);
@@ -139,6 +177,26 @@ app.get("/check/:cid", auth, async(req, res) => {
     }
 });
 
+app.get("/get_cid_from_passport/:passport_no/:nationality", auth, async(req, res) => {
+    var passport_no = req.params.passport_no;
+    var nationality = req.params.nationality;
+    try {
+        await checkToken();
+        await axios.get(`/api/GetCIDFromPassportNumber?passport_number=${passport_no}&nationality=${nationality}`, {
+            headers: {
+                Authorization: `Bearer ${_token}`
+            },
+            httpsAgent: new https.Agent({
+                rejectUnauthorized: false
+            })
+        }).then(function(response) {
+            // console.log(response)
+            res.send(response.data);
+        })
+    } catch (error) {
+        res.send({ MessageCode: 400, rows: error });
+    }
+});
 
 app.post("/send-message-to-user", auth, async(req, res) => {
     var data = req.body
@@ -182,9 +240,11 @@ app.get("/check-cvp-moph-todb/:cid", auth, async(req, res) => {
         var data_rs = [];
         // await getToken();
         await checkToken();
+        const patient = await checkHN(cid);
+
         console.log("cid:" + cid);
         // @ts-ignore
-        const response = await axios.get(`/api/ImmunizationHistory?cid=${cid}`, {
+        await axios.get(`/api/ImmunizationHistory?cid=${cid}`, {
                 headers: {
                     Authorization: `Bearer ${_token}`
                 },
@@ -192,7 +252,7 @@ app.get("/check-cvp-moph-todb/:cid", auth, async(req, res) => {
                     rejectUnauthorized: false
                 })
             }).then(async(response) => {
-                // console.log(response)
+                // console.log(response.data.result)
                 if (response.data.result.vaccine_certificate) {
                     var i = 0;
                     for await (const v of response.data.result.patient.visit) {
@@ -223,58 +283,93 @@ app.get("/check-cvp-moph-todb/:cid", auth, async(req, res) => {
                         if (ck.length == 0) {
                             await data_rs.push({
                                 ok: true,
+                                MessageCode: 200,
                                 status: true,
                                 status_color: "success",
-                                text: `Update แล้ว DOSE[${dose_no}] {${strVaccine_ref_name} - ${moment(v.visit_datetime).format("DD/MM/YYYY HH:mm:ss")}(${v.hospital_name})}`
+                                Message: `Update แล้ว DOSE[${dose_no}] {${strVaccine_ref_name} - ${moment(v.visit_datetime).format("DD/MM/YYYY HH:mm:ss")}(${v.hospital_name})}`,
+                                // StatusDB: 'insert',
                             });
                             log("[UPDATE] CID: " + cid);
                             await model.insertDataHistory(dbHIS, data);
                         } else {
                             await data_rs.push({
                                 ok: true,
+                                MessageCode: 201,
                                 status: false,
                                 status_color: "warning",
-                                text: `ข้อมูลนี้ Update ไปแล้ว DOSE[${dose_no}] {${strVaccine_ref_name} - ${moment(v.visit_datetime).format("DD/MM/YYYY HH:mm:ss")}(${v.hospital_name})}`
+                                Message: `ข้อมูลนี้ Update ไปแล้ว DOSE[${dose_no}] {${strVaccine_ref_name} - ${moment(v.visit_datetime).format("DD/MM/YYYY HH:mm:ss")}(${v.hospital_name})}`,
+                                // StatusDB: 'update',
                             });
                             // data_rs.push({a:1})
                             // console.log(data_rs)
                             log(`[NO UPDATE] CID & DOSE Duplicate ${cid}[${dose_no}] {${strVaccine_ref_name} - ${moment(v.visit_datetime).format("DD/MM/YYYY HH:mm:ss")}(${v.hospital_name})}`);
                         }
                     }
-                } else if (response.data.result.vaccine_certificate && response.data.result.patient !== null) {
+                }
+                // else if (response.data.result.vaccine_certificate && response.data.result.patient !== null) {
+                //     await data_rs.push({
+                //         ok: true,
+                //         MessageCode: 501,
+                //         status: false,
+                //         status_color: "warning",
+                //         Message: `ไม่พบข้อมูลการได้รับวัคซีน CID นี้`
+                //     });
+                //     log("ไม่พบข้อมูลการได้รับวัคซีน CID :" + cid, false);
+                // } 
+                else {
                     await data_rs.push({
                         ok: true,
-                        status: false,
-                        status_color: "warning",
-                        text: `ไม่พบข้อมูลการได้รับวัคซีน CID นี้`
-                    });
-                    log("ไม่พบข้อมูลการได้รับวัคซีน CID :" + cid, false);
-                } else {
-                    await data_rs.push({
-                        ok: true,
+                        MessageCode: 501,
                         status: false,
                         status_color: "error",
-                        text: `ไม่พบ CID นี้`
+                        Message: `ไม่พบข้อมูลการได้รับวัคซีน CID นี้`
                     });
                     log("ไม่พบ CID:" + cid, false);
                 }
                 // const data = await checkImmunizationHistoryCID(cid);
-                console.log(data_rs);
-                // res.send({ ok: true, rows: data })
-                res.send(data_rs);
+                // console.log(data_rs);
+                // res.send({ data_update: data_rs, result: response.data.result })
+                res.send({ data_rs: data_rs, api_data: response.data, patient: patient });
             })
             .catch(function(error) {
-                res.send(error.response.data);
-                // console.log(error.response.data)
-                // res.send({ ok: false, rows: error });
+                res.send(error);
             });
-        // console.log(response.data.result.vaccine_certificate);
     } catch (error) {
         // Handle Error Here
         console.log("error", error);
         res.send({ ok: false, rows: error });
     }
 });
+
+app.get('/check_label_code/:label_code', auth, async(req, res) => {
+    var label_code = req.params.label_code;
+    try {
+        const result = await model.getVaccineInventoryLabel(dbHIS, label_code);
+        if (result[0].length > 0) {
+            res.send({ ok: true, result: result[0] });
+        } else {
+            res.send({ ok: false, message: 'ไม่พบข้อมูล' });
+        }
+    } catch (error) {
+        res.send({ ok: false, message: error });
+    }
+});
+
+app.get('/del_label_code/:label_code', auth, async(req, res) => {
+    var label_code = req.params.label_code;
+    try {
+        const result = await model.setNullVaccineInventoryLabel(dbHIS, label_code);
+        console.log(result);
+        if (result) {
+            res.send({ ok: true });
+        } else {
+            res.send({ ok: false, message: `ไม่พบ label_code[${label_code}] นี้!` });
+        }
+    } catch (error) {
+        res.send({ ok: false, message: error });
+    }
+});
+
 
 function log(text, log = true) {
     var _text = `${moment().format("DD-MM-YYYY HH:mm:ss")} - ${text}`;
@@ -287,8 +382,6 @@ function log(text, log = true) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function getToken() {
-    // @ts-ignore
-    console.log("current token:" + _token);
     // @ts-ignore
     const rs = await axios.get(
         `/token?Action=get_moph_access_token&${process.env.CVP_MOPH_ACCESS_TOKEN}`, {
@@ -303,17 +396,18 @@ async function getToken() {
 
 async function checkToken() {
     // console.log('_token:' + _token);
-    if (_token) {
+    if (_token != "") {
         // @ts-ignore
         const decodeJWT = jwt_decode(_token);
         var currentTimestamp = new Date().getTime() / 1000;
-        var tokenIsNotExpired = decodeJWT.exp > currentTimestamp;
-        if (!tokenIsNotExpired) {
-            console.log('JWT Expired')
+        // var tokenIsNotExpired = decodeJWT.exp > currentTimestamp;
+        if (decodeJWT.exp < currentTimestamp) {
+            // console.log(`JWT Expired tokenIsNotExpired=${tokenIsNotExpired},ecodeJWT.exp=${ecodeJWT.exp} | currentTimestamp=${currentTimestamp}`)
+            log(`JWT=${_token} ,ecodeJWT.exp=${decodeJWT.exp} | currentTimestamp=${currentTimestamp}`)
             await getToken();
         }
     } else {
-        console.log('NO JWT');
+        log('NO JWT');
         await getToken();
     }
 }
@@ -503,20 +597,32 @@ async function getVaccineManufacturerID(text) {
         log("[WARNING]: " + error);
     }
 }
+
+async function checkHN(cid) {
+    if (cid) {
+        const rs = await model.getHNformCID(dbHIS, cid);
+        if (rs[0]) {
+            return rs[0];
+        } else {
+            return null;
+        }
+    }
+}
+
 async function runJob() {
     // await checkToken();
     log("[runJob]", false);
     await getToken();
     setTimeout(() => {
-        getFixBug();
+        // getFixBug();
         // updateFixBug();
         //getVaccineBooking(process.env.TABLE_MULTIPLE);
-        // getList()
-        // getVaccineBookingTravel()
-        // checkImmunizationHistoryCID('1200900099000') //TEST DEBUG
+        getList()
+            // getVaccineBookingTravel()
+            // checkImmunizationHistoryCID('1200900099000') //TEST DEBUG
     }, 100);
 }
-// runJob();
+runJob();
 
 //error handlers
 if (process.env.NODE_ENV === "development") {
